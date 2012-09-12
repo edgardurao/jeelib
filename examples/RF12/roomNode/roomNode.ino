@@ -1,3 +1,6 @@
+// Adapted to use the HYT131 Sensor - Code provided and adapted using sketch in http://jeelabs.org/2012/06/30/new-hyt131-sensor/
+// 2012-09-01 <edgar@durao.net>
+
 // New version of the Room Node, derived from rooms.pde
 // 2010-10-19 <jc@wippler.nl> http://opensource.org/licenses/mit-license.php
 
@@ -13,12 +16,13 @@
 #include <avr/sleep.h>
 #include <util/atomic.h>
 
-#define SERIAL  0   // set to 1 to also report readings on the serial port
-#define DEBUG   0   // set to 1 to display each loop() run and PIR trigger
+#define SERIAL  1   // set to 1 to also report readings on the serial port
+#define DEBUG   1   // set to 1 to display each loop() run and PIR trigger
 
-#define SHT11_PORT  1   // defined if SHT11 is connected to a port
+#define SHT11_PORT  0   // defined if SHT11 is connected to a port
 #define LDR_PORT    4   // defined if LDR is connected to a port's AIO pin
-#define PIR_PORT    4   // defined if PIR is connected to a port's DIO pin
+#define PIR_PORT    4   // defined if PIR is connected to a port's DIO pin - 4
+#define HYT131_PORT  1   // defined if SHT11 is connected to a port
 
 #define MEASURE_PERIOD  600 // how often to measure, in tenths of seconds
 #define RETRY_PERIOD    10  // how soon to retry if ACK didn't come in
@@ -57,6 +61,11 @@ struct {
 
 #if SHT11_PORT
     SHT11 sht11 (SHT11_PORT);
+#endif
+
+#if HYT131_PORT
+    PortI2C myBus (1);
+    DeviceI2C hyt131 (myBus, 0x28);
 #endif
 
 #if LDR_PORT
@@ -149,25 +158,52 @@ static void doMeasure() {
     payload.lobat = rf12_lowbat();
 
     #if SHT11_PORT
-#ifndef __AVR_ATtiny84__
-        sht11.measure(SHT11::HUMI, shtDelay);        
-        sht11.measure(SHT11::TEMP, shtDelay);
-        float h, t;
-        sht11.calculate(h, t);
-        int humi = h + 0.5, temp = 10 * t + 0.5;
-#else
-        //XXX TINY!
-        int humi = 50, temp = 25;
-#endif
+        #ifndef __AVR_ATtiny84__
+                sht11.measure(SHT11::HUMI, shtDelay);        
+                sht11.measure(SHT11::TEMP, shtDelay);
+                float h, t;
+                sht11.calculate(h, t);
+                int humi = h + 0.5, temp = 10 * t + 0.5;
+        #else
+                //XXX TINY!
+                int humi = 50, temp = 25;
+        #endif
         payload.humi = smoothedAverage(payload.humi, humi, firstTime);
         payload.temp = smoothedAverage(payload.temp, temp, firstTime);
     #endif
+    
+    #if HYT131_PORT
+        hyt131.send();
+        hyt131.stop();
+        delay(100);
+        
+        //readings
+        hyt131.receive();
+        word h = (hyt131.read(0) & 0x3F) << 8;
+        h |= hyt131.read(0);
+        word t = hyt131.read(0) << 6;
+        t |= hyt131.read(1) >> 2;
+        hyt131.stop();
+        
+        //Convert 0 ... 16383 -> 0 .. 100 %
+        int humi = (h * 1000L >> 14);
+        //convert 0.... 16383 to -40 .. 125ºC
+        int temp = (t * 1650L >> 14) - 400;
+        Serial.print(temp * 0.1,1);
+        Serial.print(" C, ");
+        Serial.print(humi * 0.1,1);
+        Serial.println(" %, ");
+        payload.humi = smoothedAverage(payload.humi, humi* 0.1, firstTime);
+        payload.temp = smoothedAverage(payload.temp, temp* 0.1, firstTime);              
+    #endif
+    
     #if LDR_PORT
         ldr.digiWrite2(1);  // enable AIO pull-up
         byte light = ~ ldr.anaRead() >> 2;
         ldr.digiWrite2(0);  // disable pull-up to reduce current draw
         payload.light = smoothedAverage(payload.light, light, firstTime);
     #endif
+    
     #if PIR_PORT
         payload.moved = pir.state();
     #endif
@@ -260,13 +296,20 @@ void setup () {
     rf12_sleep(RF12_SLEEP); // power down
     
     #if PIR_PORT
-        pir.digiWrite(PIR_PULLUP);
-#ifdef PCMSK2
-        bitSet(PCMSK2, PIR_PORT + 3);
-        bitSet(PCICR, PCIE2);
-#else
-        //XXX TINY!
-#endif
+      pir.digiWrite(PIR_PULLUP);
+      #ifdef PCMSK2
+              bitSet(PCMSK2, PIR_PORT + 3);
+              bitSet(PCICR, PCIE2);
+      #else
+              //XXX TINY!
+      #endif
+    #endif
+    
+    #if HYT131_PORT && (SERIAL || DEBUG)
+      Serial.println("\n[hyt131test]");
+      delay(100);
+      if (hyt131.isPresent())
+      Serial.println("HYT131 found!");
     #endif
 
     reportCount = REPORT_EVERY;     // report right away for easy debugging
